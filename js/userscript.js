@@ -6,6 +6,7 @@
 // @match        https://play2048.co/*
 // @run-at       document-idle
 // @grant        none
+// @license      GPL-3.0-or-later
 // ==/UserScript==
 
 (() => {
