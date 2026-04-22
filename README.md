@@ -1,5 +1,7 @@
 # play2048.co WASM AI Userscript
 
+**这个项目的Vibecoding成分是100%，仅仅作为算法验证**
+
 Rust/WASM 版 2048 AI，用 userscript 注入到 `https://play2048.co/`。JS 部分会先接入网页内部游戏状态，再调用 Rust WASM 的 expectimax bot 输出移动。
 
 ## Requirements
