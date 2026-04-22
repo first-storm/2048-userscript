@@ -44,6 +44,9 @@
       .replaceAll('from"./', `from"${assetBase}`)
       .replaceAll('import("./', `import("${assetBase}`)
       .replaceAll('new URL("./', `new URL("${assetBase}`)
+      .replace(/new URL\((["'])(?![a-z][a-z\d+.-]*:|\/)(\.\/)?([^"']+)\1\s*,\s*import\.meta\.url\)/gi, (_match, _quote, _dotSlash, path) => {
+        return `new URL("${assetBase}${path}")`;
+      })
       .replace(needle, injection);
   }
 
@@ -105,7 +108,7 @@
       return originalInsertBefore.call(this, node, child);
     };
 
-    new MutationObserver((records) => {
+    observeScriptInsertions(new MutationObserver((records) => {
       for (const record of records) {
         for (const node of record.addedNodes) {
           if (!shouldPatchScript(node)) continue;
@@ -113,7 +116,15 @@
           loadPatchedModule(node.src).catch((error) => console.error("[Play2048IO]", error));
         }
       }
-    }).observe(document.documentElement, { childList: true, subtree: true });
+    }));
+  }
+
+  function observeScriptInsertions(observer) {
+    if (document.documentElement) {
+      observer.observe(document.documentElement, { childList: true, subtree: true });
+      return;
+    }
+    queueMicrotask(() => observeScriptInsertions(observer));
   }
 
   function patchExistingScripts() {

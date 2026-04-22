@@ -23,7 +23,7 @@ function main() {
     const userscript = readRequiredText(userscriptPath);
     const wasmBase64 = readFileSync(wasmPath).toString("base64");
 
-    const header = extractUserscriptHeader(userscript, userscriptPath);
+    const header = forceDocumentStart(extractUserscriptHeader(userscript, userscriptPath));
     const ioBody = stripUserscriptHeader(ioFramework, ioFrameworkPath).trim();
     const botBody = embedWasm(stripUserscriptHeader(userscript, userscriptPath).trim(), wasmBase64);
     const bundled = `${header}\n\n${ioBody}\n\n${botBody}\n`;
@@ -58,6 +58,13 @@ function extractUserscriptHeader(source, path) {
     const match = source.match(userscriptHeaderPattern());
     if (!match) throw new Error(`Could not find userscript header in ${path}`);
     return match[0].trimEnd();
+}
+
+function forceDocumentStart(header) {
+    if (/^\/\/ @run-at\s+/m.test(header)) {
+        return header.replace(/^\/\/ @run-at\s+.*$/m, "// @run-at       document-start");
+    }
+    return header.replace(/^\/\/ ==\/UserScript==$/m, "// @run-at       document-start\n// ==/UserScript==");
 }
 
 function stripUserscriptHeader(source, path) {
