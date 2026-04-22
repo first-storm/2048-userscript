@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const wasmPath = join(root, "target", "wasm32-unknown-unknown", "release", "play2048_wasm_ai.wasm");
-const userscriptPath = join(root, "userscript.js");
+const userscriptPath = join(root, "js", "userscript.js");
 
 const wasmBase64 = readFileSync(wasmPath).toString("base64");
 const userscript = readFileSync(userscriptPath, "utf8");
