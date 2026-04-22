@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use hashbrown::HashMap;
 use std::sync::OnceLock;
 
 type Board = u64;
@@ -16,6 +16,7 @@ const SCORE_EMPTY_WEIGHT: f32 = 270.0;
 
 const CPROB_THRESH_BASE: f32 = 0.0001;
 const CACHE_DEPTH_LIMIT: i32 = 15;
+const TRANS_TABLE_CAPACITY: usize = 1 << 20;
 
 static TABLES: OnceLock<Tables> = OnceLock::new();
 static mut LAST_NODES: u64 = 0;
@@ -49,7 +50,7 @@ struct EvalState {
 impl EvalState {
     fn new(board: Board) -> Self {
         Self {
-            trans_table: HashMap::new(),
+            trans_table: HashMap::with_capacity(TRANS_TABLE_CAPACITY),
             maxdepth: 0,
             curdepth: 0,
             cachehits: 0,
@@ -429,6 +430,8 @@ fn score_tilechoose_node(state: &mut EvalState, board: Board, cprob: f32) -> f32
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap as StdHashMap;
+    use std::time::Instant;
 
     fn board_from_ranks(ranks: [[u64; 4]; 4]) -> Board {
         let mut board = 0;
@@ -440,6 +443,128 @@ mod tests {
             }
         }
         board
+    }
+
+    struct StdEvalState {
+        trans_table: StdHashMap<Board, TransEntry>,
+        maxdepth: i32,
+        curdepth: i32,
+        cachehits: u32,
+        moves_evaled: u64,
+        depth_limit: i32,
+    }
+
+    impl StdEvalState {
+        fn new(board: Board) -> Self {
+            Self {
+                trans_table: StdHashMap::with_capacity(TRANS_TABLE_CAPACITY),
+                maxdepth: 0,
+                curdepth: 0,
+                cachehits: 0,
+                moves_evaled: 0,
+                depth_limit: 3.max(count_distinct_tiles(board) - 2),
+            }
+        }
+    }
+
+    fn score_toplevel_move_std(state: &mut StdEvalState, board: Board, move_id: i32) -> f32 {
+        let new_board = execute_move(move_id, board);
+        if board == new_board {
+            return 0.0;
+        }
+        score_tilechoose_node_std(state, new_board, 1.0) + 1e-6
+    }
+
+    fn score_move_node_std(state: &mut StdEvalState, board: Board, cprob: f32) -> f32 {
+        let mut best = 0.0f32;
+        state.curdepth += 1;
+
+        for move_id in 0..4 {
+            let new_board = execute_move(move_id, board);
+            state.moves_evaled += 1;
+            if board != new_board {
+                best = best.max(score_tilechoose_node_std(state, new_board, cprob));
+            }
+        }
+
+        state.curdepth -= 1;
+        best
+    }
+
+    fn score_tilechoose_node_std(state: &mut StdEvalState, board: Board, cprob: f32) -> f32 {
+        if cprob < CPROB_THRESH_BASE || state.curdepth >= state.depth_limit {
+            state.maxdepth = state.maxdepth.max(state.curdepth);
+            return score_heur_board(board);
+        }
+
+        if state.curdepth < CACHE_DEPTH_LIMIT {
+            if let Some(entry) = state.trans_table.get(&board) {
+                if entry.depth as i32 <= state.curdepth {
+                    state.cachehits += 1;
+                    return entry.heuristic;
+                }
+            }
+        }
+
+        let num_open = count_empty(board);
+        if num_open == 0 {
+            return score_move_node_std(state, board, cprob);
+        }
+
+        let next_prob = cprob / num_open as f32;
+        let mut res = 0.0f32;
+        let mut tmp = board;
+        let mut tile_2 = 1u64;
+
+        for _ in 0..16 {
+            if tmp & 0xf == 0 {
+                res += score_move_node_std(state, board | tile_2, next_prob * 0.9) * 0.9;
+                res += score_move_node_std(state, board | (tile_2 << 1), next_prob * 0.1) * 0.1;
+            }
+            tmp >>= 4;
+            tile_2 <<= 4;
+        }
+
+        res /= num_open as f32;
+
+        if state.curdepth < CACHE_DEPTH_LIMIT {
+            state.trans_table.insert(
+                board,
+                TransEntry {
+                    depth: state.curdepth as u8,
+                    heuristic: res,
+                },
+            );
+        }
+
+        res
+    }
+
+    fn choose_move_std(board: Board) -> i32 {
+        let mut state = StdEvalState::new(board);
+        let mut best = 0.0f32;
+        let mut best_move = -1;
+
+        for move_id in 0..4 {
+            let res = score_toplevel_move_std(&mut state, board, move_id);
+            if res > best {
+                best = res;
+                best_move = move_id;
+            }
+        }
+
+        best_move
+    }
+
+    fn sample_boards() -> [Board; 6] {
+        [
+            board_from_ranks([[1, 2, 3, 4], [0, 1, 0, 2], [0, 0, 1, 0], [0, 0, 0, 0]]),
+            board_from_ranks([[4, 3, 2, 1], [3, 2, 1, 0], [2, 1, 0, 0], [1, 0, 0, 0]]),
+            board_from_ranks([[8, 7, 6, 5], [7, 6, 5, 4], [6, 5, 4, 3], [0, 0, 1, 2]]),
+            board_from_ranks([[11, 10, 9, 8], [7, 6, 5, 4], [3, 2, 1, 0], [0, 0, 0, 0]]),
+            board_from_ranks([[1, 1, 2, 2], [3, 3, 4, 4], [5, 5, 6, 6], [7, 0, 0, 0]]),
+            board_from_ranks([[12, 11, 10, 9], [8, 7, 6, 5], [4, 3, 2, 1], [0, 0, 0, 0]]),
+        ]
     }
 
     #[test]
@@ -499,5 +624,59 @@ mod tests {
         let move_id = choose_move(board);
         assert!((0..4).contains(&move_id));
         assert_ne!(execute_move(move_id, board), board);
+    }
+
+    #[test]
+    fn hashbrown_cache_matches_std_hashmap_reference() {
+        init_tables();
+
+        for board in sample_boards() {
+            let mut fast_state = EvalState::new(board);
+            let mut ref_state = StdEvalState::new(board);
+
+            for move_id in 0..4 {
+                let fast = score_toplevel_move(&mut fast_state, board, move_id);
+                let reference = score_toplevel_move_std(&mut ref_state, board, move_id);
+                assert_eq!(
+                    fast.to_bits(),
+                    reference.to_bits(),
+                    "move {move_id} differs for board 0x{board:016x}"
+                );
+            }
+
+            assert_eq!(
+                choose_move(board),
+                choose_move_std(board),
+                "best move differs for board 0x{board:016x}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "performance smoke test; run with --ignored --nocapture"]
+    fn hashbrown_performance_smoke() {
+        init_tables();
+        let boards = sample_boards();
+
+        let start = Instant::now();
+        let mut fast_sum = 0i32;
+        for _ in 0..3 {
+            for board in boards {
+                fast_sum += choose_move(board);
+            }
+        }
+        let fast_elapsed = start.elapsed();
+
+        let start = Instant::now();
+        let mut ref_sum = 0i32;
+        for _ in 0..3 {
+            for board in boards {
+                ref_sum += choose_move_std(board);
+            }
+        }
+        let ref_elapsed = start.elapsed();
+
+        assert_eq!(fast_sum, ref_sum);
+        println!("hashbrown: {fast_elapsed:?}, std HashMap reference: {ref_elapsed:?}");
     }
 }

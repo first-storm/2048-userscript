@@ -3,6 +3,9 @@ name = "play2048_wasm_ai"
 version = "0.1.0"
 edition = "2021"
 
+[dependencies]
+hashbrown = "0.16"
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 
