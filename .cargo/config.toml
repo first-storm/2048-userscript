@@ -1,0 +1,9 @@
+[build]
+rustflags = [
+    "-C", "target-cpu=generic",
+]
+
+[target.wasm32-unknown-unknown]
+rustflags = [
+    "-C", "target-feature=+bulk-memory,+mutable-globals,+sign-ext",
+]
