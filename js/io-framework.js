@@ -223,6 +223,16 @@
     return 0;
   }
 
+  function maxTileInBoard(board) {
+    let max = 0;
+    for (const row of board) {
+      for (const value of row) {
+        if (value > max) max = value;
+      }
+    }
+    return max;
+  }
+
   function requireApi() {
     const api = native.api || window.__play2048Native;
     if (!api) throw new Error("native gameplay API not ready yet; await Play2048IO.ready");
@@ -238,11 +248,13 @@
     return {
       board,
       score: state.score,
-      maxTile: Math.max(...board.flat()),
+      maxTile: maxTileInBoard(board),
       moveCount: state.moveCount,
       state: state.state,
       over: String(state.state).toLowerCase().includes("over"),
-      powerups: clonePlain(state.powerups),
+      get powerups() {
+        return clonePlain(state.powerups);
+      },
       raw: state,
     };
   }

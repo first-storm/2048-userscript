@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -47,6 +47,22 @@ function buildWasm() {
         cwd: root,
         stdio: "inherit",
     });
+    optimizeWasm();
+}
+
+function optimizeWasm() {
+    const optimizedPath = `${wasmPath}.opt`;
+    try {
+        execFileSync("wasm-opt", ["-O4", "--enable-bulk-memory", wasmPath, "-o", optimizedPath], {
+            cwd: root,
+            stdio: "inherit",
+        });
+        renameSync(optimizedPath, wasmPath);
+    } catch (error) {
+        if (existsSync(optimizedPath)) unlinkSync(optimizedPath);
+        const code = error && error.code ? ` (${error.code})` : "";
+        console.warn(`Skipping wasm-opt${code}`);
+    }
 }
 
 function readRequiredText(path) {

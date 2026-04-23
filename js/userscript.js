@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         play2048.co Rust WASM Expectimax Bot
 // @namespace    https://play2048.co/
-// @version      0.5.1
+// @version      0.5.3
 // @description  Rust WASM 2048 AI
 // @match        https://play2048.co/*
 // @run-at       document-idle
@@ -90,8 +90,9 @@ self.onmessage = async (event) => {
     const { id, board } = event.data;
     try {
         const exports = await loadWasm();
+        const bitboard = typeof board === "bigint" ? board : BigInt(board);
         const t0 = performance.now();
-        const move = exports.choose_move(BigInt(board));
+        const move = exports.choose_move(bitboard);
         self.postMessage({
             id,
             ok: true,
@@ -102,8 +103,8 @@ self.onmessage = async (event) => {
                 depth: exports.last_depth(),
                 nodes: exports.last_nodes(),
                 cache: exports.last_cache_hits(),
-                heur: exports.score_heur_board_export(BigInt(board)),
-                actual: exports.score_board_export(BigInt(board)),
+                heur: exports.score_heur_board_export(bitboard),
+                actual: exports.score_board_export(bitboard),
             },
         });
     } catch (error) {
@@ -157,7 +158,16 @@ self.onmessage = async (event) => {
                     const id = ++workerSeq;
                     return await new Promise((resolve, reject) => {
                         workerPending.set(id, { resolve, reject });
-                        worker.postMessage({ id, board: board.toString() });
+                        try {
+                            worker.postMessage({ id, board });
+                        } catch (error) {
+                            try {
+                                worker.postMessage({ id, board: board.toString() });
+                            } catch (fallbackError) {
+                                workerPending.delete(id);
+                                reject(fallbackError);
+                            }
+                        }
                     });
                 } catch (error) {
                     console.warn("[2048 WASM] Worker think failed, using sync fallback", error);

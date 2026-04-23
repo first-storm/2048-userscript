@@ -1,4 +1,5 @@
 use hashbrown::HashMap;
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
@@ -27,6 +28,11 @@ static mut LAST_NODES: u64 = 0;
 static mut LAST_CACHE_HITS: u32 = 0;
 static mut LAST_DEPTH: i32 = 0;
 
+thread_local! {
+    static REUSABLE_TRANS_TABLE: RefCell<HashMap<Board, TransEntry>> =
+        RefCell::new(HashMap::new());
+}
+
 struct Tables {
     row_left: Box<[Row; 65536]>,
     row_right: Box<[Row; 65536]>,
@@ -42,8 +48,8 @@ struct TransEntry {
     heuristic: f32,
 }
 
-struct EvalState {
-    trans_table: HashMap<Board, TransEntry>,
+struct EvalState<'a> {
+    trans_table: &'a mut HashMap<Board, TransEntry>,
     maxdepth: i32,
     curdepth: i32,
     cachehits: u32,
@@ -51,10 +57,16 @@ struct EvalState {
     depth_limit: i32,
 }
 
-impl EvalState {
-    fn new(board: Board) -> Self {
+impl<'a> EvalState<'a> {
+    fn new(board: Board, trans_table: &'a mut HashMap<Board, TransEntry>) -> Self {
+        trans_table.clear();
+        let target_capacity = trans_table_capacity();
+        if trans_table.capacity() < target_capacity {
+            trans_table.reserve(target_capacity - trans_table.capacity());
+        }
+
         Self {
-            trans_table: HashMap::with_capacity(trans_table_capacity()),
+            trans_table,
             maxdepth: 0,
             curdepth: 0,
             cachehits: 0,
@@ -80,7 +92,14 @@ pub extern "C" fn set_trans_table_capacity(capacity: usize) {
 #[no_mangle]
 pub extern "C" fn choose_move(board: Board) -> i32 {
     let _ = tables();
-    let mut state = EvalState::new(board);
+    REUSABLE_TRANS_TABLE.with(|trans_table| {
+        let mut trans_table = trans_table.borrow_mut();
+        choose_move_with_table(board, &mut trans_table)
+    })
+}
+
+fn choose_move_with_table(board: Board, trans_table: &mut HashMap<Board, TransEntry>) -> i32 {
+    let mut state = EvalState::new(board, trans_table);
     let mut best = 0.0f32;
     let mut best_move = -1;
 
@@ -647,7 +666,8 @@ mod tests {
         init_tables();
 
         for board in sample_boards() {
-            let mut fast_state = EvalState::new(board);
+            let mut fast_table = HashMap::with_capacity(trans_table_capacity());
+            let mut fast_state = EvalState::new(board, &mut fast_table);
             let mut ref_state = StdEvalState::new(board);
 
             for move_id in 0..4 {
@@ -664,6 +684,41 @@ mod tests {
                 choose_move(board),
                 choose_move_std(board),
                 "best move differs for board 0x{board:016x}"
+            );
+        }
+    }
+
+    #[test]
+    fn reusable_trans_table_matches_fresh_hashbrown() {
+        init_tables();
+
+        for board in sample_boards() {
+            let mut fresh_table = HashMap::with_capacity(trans_table_capacity());
+            let fresh_move = choose_move_with_table(board, &mut fresh_table);
+            let fresh_nodes = unsafe { LAST_NODES };
+            let fresh_cache_hits = unsafe { LAST_CACHE_HITS };
+            let fresh_depth = unsafe { LAST_DEPTH };
+
+            let reused_move = choose_move(board);
+            let reused_nodes = unsafe { LAST_NODES };
+            let reused_cache_hits = unsafe { LAST_CACHE_HITS };
+            let reused_depth = unsafe { LAST_DEPTH };
+
+            assert_eq!(
+                fresh_move, reused_move,
+                "move differs for board 0x{board:016x}"
+            );
+            assert_eq!(
+                fresh_nodes, reused_nodes,
+                "nodes differ for board 0x{board:016x}"
+            );
+            assert_eq!(
+                fresh_cache_hits, reused_cache_hits,
+                "cache hits differ for board 0x{board:016x}"
+            );
+            assert_eq!(
+                fresh_depth, reused_depth,
+                "depth differs for board 0x{board:016x}"
             );
         }
     }
