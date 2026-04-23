@@ -1,4 +1,5 @@
 use hashbrown::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 type Board = u64;
@@ -16,9 +17,12 @@ const SCORE_EMPTY_WEIGHT: f32 = 270.0;
 
 const CPROB_THRESH_BASE: f32 = 0.0001;
 const CACHE_DEPTH_LIMIT: i32 = 15;
-const TRANS_TABLE_CAPACITY: usize = 1 << 20;
+const DEFAULT_TRANS_TABLE_CAPACITY: usize = 1 << 20;
+const MIN_TRANS_TABLE_CAPACITY: usize = 1 << 12;
+const MAX_TRANS_TABLE_CAPACITY: usize = 1 << 20;
 
 static TABLES: OnceLock<Tables> = OnceLock::new();
+static TRANS_TABLE_CAPACITY: AtomicUsize = AtomicUsize::new(DEFAULT_TRANS_TABLE_CAPACITY);
 static mut LAST_NODES: u64 = 0;
 static mut LAST_CACHE_HITS: u32 = 0;
 static mut LAST_DEPTH: i32 = 0;
@@ -50,7 +54,7 @@ struct EvalState {
 impl EvalState {
     fn new(board: Board) -> Self {
         Self {
-            trans_table: HashMap::with_capacity(TRANS_TABLE_CAPACITY),
+            trans_table: HashMap::with_capacity(trans_table_capacity()),
             maxdepth: 0,
             curdepth: 0,
             cachehits: 0,
@@ -63,6 +67,14 @@ impl EvalState {
 #[no_mangle]
 pub extern "C" fn init_tables() {
     let _ = tables();
+}
+
+#[no_mangle]
+pub extern "C" fn set_trans_table_capacity(capacity: usize) {
+    TRANS_TABLE_CAPACITY.store(
+        capacity.clamp(MIN_TRANS_TABLE_CAPACITY, MAX_TRANS_TABLE_CAPACITY),
+        Ordering::Relaxed,
+    );
 }
 
 #[no_mangle]
@@ -116,6 +128,10 @@ pub extern "C" fn last_depth() -> i32 {
 
 fn tables() -> &'static Tables {
     TABLES.get_or_init(build_tables)
+}
+
+fn trans_table_capacity() -> usize {
+    TRANS_TABLE_CAPACITY.load(Ordering::Relaxed)
 }
 
 fn reverse_row(row: Row) -> Row {
@@ -457,7 +473,7 @@ mod tests {
     impl StdEvalState {
         fn new(board: Board) -> Self {
             Self {
-                trans_table: StdHashMap::with_capacity(TRANS_TABLE_CAPACITY),
+                trans_table: StdHashMap::with_capacity(trans_table_capacity()),
                 maxdepth: 0,
                 curdepth: 0,
                 cachehits: 0,
