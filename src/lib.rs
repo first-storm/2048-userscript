@@ -50,7 +50,6 @@ struct TransEntry {
 
 struct EvalState<'a> {
     trans_table: &'a mut HashMap<Board, TransEntry>,
-    maxdepth: i32,
     curdepth: i32,
     cachehits: u32,
     moves_evaled: u64,
@@ -67,7 +66,6 @@ impl<'a> EvalState<'a> {
 
         Self {
             trans_table,
-            maxdepth: 0,
             curdepth: 0,
             cachehits: 0,
             moves_evaled: 0,
@@ -415,7 +413,6 @@ fn score_move_node(state: &mut EvalState, board: Board, cprob: f32) -> f32 {
 
 fn score_tilechoose_node(state: &mut EvalState, board: Board, cprob: f32) -> f32 {
     if cprob < CPROB_THRESH_BASE || state.curdepth >= state.depth_limit {
-        state.maxdepth = state.maxdepth.max(state.curdepth);
         return score_heur_board(board);
     }
 

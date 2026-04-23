@@ -186,6 +186,21 @@
       return out;
     }
 
+    if (board && typeof board === "object") {
+      const rows = board.grid || board.rows || board.matrix;
+      if (Array.isArray(rows) && Array.isArray(rows[0])) {
+        for (let r = 0; r < Math.min(4, rows.length); r += 1) {
+          for (let c = 0; c < Math.min(4, rows[r].length); c += 1) {
+            out[r][c] = tileValue(rows[r][c]);
+          }
+        }
+        return out;
+      }
+
+      const directTiles = board.tiles || board.cells || board.tileList || board.items;
+      if (fillTiles(out, directTiles)) return out;
+    }
+
     const seen = new WeakSet();
     const visit = (value, depth = 0) => {
       if (!value || typeof value !== "object" || seen.has(value) || depth > 8) return;
@@ -213,6 +228,23 @@
 
     visit(board);
     return out;
+  }
+
+  function fillTiles(out, tiles) {
+    if (!tiles || typeof tiles !== "object") return false;
+    let filled = 0;
+    const values = tiles instanceof Map || tiles instanceof Set ? tiles.values() : Array.isArray(tiles) ? tiles : Object.values(tiles);
+    for (const tile of values) {
+      if (!tile || typeof tile !== "object") continue;
+      const pos = tile.position || tile.pos;
+      if (!pos || !Number.isInteger(pos.x) || !Number.isInteger(pos.y)) continue;
+      const v = tileValue(tile);
+      if (v && pos.x >= 0 && pos.x < 4 && pos.y >= 0 && pos.y < 4) {
+        out[pos.x][pos.y] = v;
+        filled += 1;
+      }
+    }
+    return filled > 0;
   }
 
   function tileValue(tile) {
