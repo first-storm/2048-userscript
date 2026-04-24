@@ -1,467 +1,28 @@
-use hashbrown::HashMap;
-use std::cell::RefCell;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::OnceLock;
-
-type Board = u64;
-type Row = u16;
-
-const ROW_MASK: Board = 0xffff;
-
-const SCORE_LOST_PENALTY: f32 = 200000.0;
-const SCORE_MONOTONICITY_POWER: f32 = 4.0;
-const SCORE_MONOTONICITY_WEIGHT: f32 = 47.0;
-const SCORE_SUM_POWER: f32 = 3.5;
-const SCORE_SUM_WEIGHT: f32 = 11.0;
-const SCORE_MERGES_WEIGHT: f32 = 700.0;
-const SCORE_EMPTY_WEIGHT: f32 = 270.0;
-
-const CPROB_THRESH_BASE: f32 = 0.0001;
-const CACHE_DEPTH_LIMIT: i32 = 15;
-const DEFAULT_TRANS_TABLE_CAPACITY: usize = 1 << 20;
-const MIN_TRANS_TABLE_CAPACITY: usize = 1 << 12;
-const MAX_TRANS_TABLE_CAPACITY: usize = 1 << 20;
-
-static TABLES: OnceLock<Tables> = OnceLock::new();
-static TRANS_TABLE_CAPACITY: AtomicUsize = AtomicUsize::new(DEFAULT_TRANS_TABLE_CAPACITY);
-static mut LAST_NODES: u64 = 0;
-static mut LAST_CACHE_HITS: u32 = 0;
-static mut LAST_DEPTH: i32 = 0;
-
-thread_local! {
-    static REUSABLE_TRANS_TABLE: RefCell<HashMap<Board, TransEntry>> =
-        RefCell::new(HashMap::new());
-}
-
-struct Tables {
-    row_left: Box<[Row; 65536]>,
-    row_right: Box<[Row; 65536]>,
-    col_up: Box<[Board; 65536]>,
-    col_down: Box<[Board; 65536]>,
-    heur_score: Box<[f32; 65536]>,
-    score: Box<[f32; 65536]>,
-}
-
-#[derive(Clone, Copy)]
-struct TransEntry {
-    depth: u8,
-    heuristic: f32,
-}
-
-struct EvalState<'a> {
-    trans_table: &'a mut HashMap<Board, TransEntry>,
-    curdepth: i32,
-    cachehits: u32,
-    moves_evaled: u64,
-    depth_limit: i32,
-}
-
-impl<'a> EvalState<'a> {
-    fn new(board: Board, trans_table: &'a mut HashMap<Board, TransEntry>) -> Self {
-        trans_table.clear();
-        let target_capacity = trans_table_capacity();
-        if trans_table.capacity() < target_capacity {
-            trans_table.reserve(target_capacity - trans_table.capacity());
-        }
-
-        Self {
-            trans_table,
-            curdepth: 0,
-            cachehits: 0,
-            moves_evaled: 0,
-            depth_limit: 3.max(count_distinct_tiles(board) - 2),
-        }
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn init_tables() {
-    let _ = tables();
-}
-
-#[no_mangle]
-pub extern "C" fn set_trans_table_capacity(capacity: usize) {
-    TRANS_TABLE_CAPACITY.store(
-        capacity.clamp(MIN_TRANS_TABLE_CAPACITY, MAX_TRANS_TABLE_CAPACITY),
-        Ordering::Relaxed,
-    );
-}
-
-#[no_mangle]
-pub extern "C" fn choose_move(board: Board) -> i32 {
-    let _ = tables();
-    REUSABLE_TRANS_TABLE.with(|trans_table| {
-        let mut trans_table = trans_table.borrow_mut();
-        choose_move_with_table(board, &mut trans_table)
-    })
-}
-
-fn choose_move_with_table(board: Board, trans_table: &mut HashMap<Board, TransEntry>) -> i32 {
-    let mut state = EvalState::new(board, trans_table);
-    let mut best = 0.0f32;
-    let mut best_move = -1;
-
-    for move_id in 0..4 {
-        let res = score_toplevel_move(&mut state, board, move_id);
-        if res > best {
-            best = res;
-            best_move = move_id;
-        }
-    }
-
-    unsafe {
-        LAST_NODES = state.moves_evaled;
-        LAST_CACHE_HITS = state.cachehits;
-        LAST_DEPTH = state.depth_limit;
-    }
-
-    best_move
-}
-
-#[no_mangle]
-pub extern "C" fn score_heur_board_export(board: Board) -> f64 {
-    score_heur_board(board) as f64
-}
-
-#[no_mangle]
-pub extern "C" fn score_board_export(board: Board) -> f64 {
-    score_board(board) as f64
-}
-
-#[no_mangle]
-pub extern "C" fn last_nodes() -> u64 {
-    unsafe { LAST_NODES }
-}
-
-#[no_mangle]
-pub extern "C" fn last_cache_hits() -> u32 {
-    unsafe { LAST_CACHE_HITS }
-}
-
-#[no_mangle]
-pub extern "C" fn last_depth() -> i32 {
-    unsafe { LAST_DEPTH }
-}
-
-fn tables() -> &'static Tables {
-    TABLES.get_or_init(build_tables)
-}
-
-fn trans_table_capacity() -> usize {
-    TRANS_TABLE_CAPACITY.load(Ordering::Relaxed)
-}
-
-fn reverse_row(row: Row) -> Row {
-    ((row >> 12) & 0x000f) | ((row >> 4) & 0x00f0) | ((row << 4) & 0x0f00) | ((row << 12) & 0xf000)
-}
-
-fn unpack_col(row: Row) -> Board {
-    let row = row as Board;
-    (row & 0x000f) | ((row & 0x00f0) << 12) | ((row & 0x0f00) << 24) | ((row & 0xf000) << 36)
-}
-
-fn transpose(x: Board) -> Board {
-    let a1 = x & 0xF0F00F0FF0F00F0F;
-    let a2 = x & 0x0000F0F00000F0F0;
-    let a3 = x & 0x0F0F00000F0F0000;
-    let a = a1 | (a2 << 12) | (a3 >> 12);
-    let b1 = a & 0xFF00FF0000FF00FF;
-    let b2 = a & 0x00FF00FF00000000;
-    let b3 = a & 0x00000000FF00FF00;
-    b1 | (b2 >> 24) | (b3 << 24)
-}
-
-fn count_empty(mut x: Board) -> i32 {
-    x |= (x >> 2) & 0x3333333333333333;
-    x |= x >> 1;
-    x = !x & 0x1111111111111111;
-    x += x >> 32;
-    x += x >> 16;
-    x += x >> 8;
-    x += x >> 4;
-    (x & 0xf) as i32
-}
-
-fn count_distinct_tiles(mut board: Board) -> i32 {
-    let mut bitset = 0u16;
-    while board != 0 {
-        bitset |= 1 << (board & 0xf);
-        board >>= 4;
-    }
-    bitset >>= 1;
-
-    let mut count = 0;
-    while bitset != 0 {
-        bitset &= bitset - 1;
-        count += 1;
-    }
-    count
-}
-
-fn build_tables() -> Tables {
-    let mut row_left = Box::new([0u16; 65536]);
-    let mut row_right = Box::new([0u16; 65536]);
-    let mut col_up = Box::new([0u64; 65536]);
-    let mut col_down = Box::new([0u64; 65536]);
-    let mut heur_score = Box::new([0f32; 65536]);
-    let mut score = Box::new([0f32; 65536]);
-
-    for row in 0..65536usize {
-        let line = [
-            ((row >> 0) & 0xf) as u32,
-            ((row >> 4) & 0xf) as u32,
-            ((row >> 8) & 0xf) as u32,
-            ((row >> 12) & 0xf) as u32,
-        ];
-
-        let mut row_score = 0.0f32;
-        for rank in line {
-            if rank >= 2 {
-                row_score += (rank - 1) as f32 * (1u32 << rank) as f32;
-            }
-        }
-        score[row] = row_score;
-
-        let mut sum = 0.0f32;
-        let mut empty = 0;
-        let mut merges = 0;
-        let mut prev = 0;
-        let mut counter = 0;
-
-        for rank in line {
-            sum += (rank as f32).powf(SCORE_SUM_POWER);
-            if rank == 0 {
-                empty += 1;
-            } else {
-                if prev == rank {
-                    counter += 1;
-                } else if counter > 0 {
-                    merges += 1 + counter;
-                    counter = 0;
-                }
-                prev = rank;
-            }
-        }
-
-        if counter > 0 {
-            merges += 1 + counter;
-        }
-
-        let mut monotonicity_left = 0.0f32;
-        let mut monotonicity_right = 0.0f32;
-        for i in 1..4 {
-            let left = line[i - 1] as f32;
-            let right = line[i] as f32;
-            if line[i - 1] > line[i] {
-                monotonicity_left +=
-                    left.powf(SCORE_MONOTONICITY_POWER) - right.powf(SCORE_MONOTONICITY_POWER);
-            } else {
-                monotonicity_right +=
-                    right.powf(SCORE_MONOTONICITY_POWER) - left.powf(SCORE_MONOTONICITY_POWER);
-            }
-        }
-
-        heur_score[row] = SCORE_LOST_PENALTY
-            + SCORE_EMPTY_WEIGHT * empty as f32
-            + SCORE_MERGES_WEIGHT * merges as f32
-            - SCORE_MONOTONICITY_WEIGHT * monotonicity_left.min(monotonicity_right)
-            - SCORE_SUM_WEIGHT * sum;
-
-        // The C++ loop retries the same position after sliding into an empty slot.
-        let mut line = [
-            ((row >> 0) & 0xf) as u32,
-            ((row >> 4) & 0xf) as u32,
-            ((row >> 8) & 0xf) as u32,
-            ((row >> 12) & 0xf) as u32,
-        ];
-        let mut i = 0isize;
-        while i < 3 {
-            let idx = i as usize;
-            let mut j = idx + 1;
-            while j < 4 && line[j] == 0 {
-                j += 1;
-            }
-            if j == 4 {
-                break;
-            }
-
-            if line[idx] == 0 {
-                line[idx] = line[j];
-                line[j] = 0;
-                i -= 1;
-            } else if line[idx] == line[j] {
-                if line[idx] != 0xf {
-                    line[idx] += 1;
-                }
-                line[j] = 0;
-            }
-            i += 1;
-        }
-
-        let result = ((line[0] << 0) | (line[1] << 4) | (line[2] << 8) | (line[3] << 12)) as Row;
-        let rev_result = reverse_row(result);
-        let rev_row = reverse_row(row as Row) as usize;
-
-        row_left[row] = row as Row ^ result;
-        row_right[rev_row] = rev_row as Row ^ rev_result;
-        col_up[row] = unpack_col(row as Row) ^ unpack_col(result);
-        col_down[rev_row] = unpack_col(rev_row as Row) ^ unpack_col(rev_result);
-    }
-
-    Tables {
-        row_left,
-        row_right,
-        col_up,
-        col_down,
-        heur_score,
-        score,
-    }
-}
-
-fn execute_move_0(board: Board) -> Board {
-    let tables = tables();
-    let mut ret = board;
-    let t = transpose(board);
-    ret ^= tables.col_up[((t >> 0) & ROW_MASK) as usize] << 0;
-    ret ^= tables.col_up[((t >> 16) & ROW_MASK) as usize] << 4;
-    ret ^= tables.col_up[((t >> 32) & ROW_MASK) as usize] << 8;
-    ret ^= tables.col_up[((t >> 48) & ROW_MASK) as usize] << 12;
-    ret
-}
-
-fn execute_move_1(board: Board) -> Board {
-    let tables = tables();
-    let mut ret = board;
-    let t = transpose(board);
-    ret ^= tables.col_down[((t >> 0) & ROW_MASK) as usize] << 0;
-    ret ^= tables.col_down[((t >> 16) & ROW_MASK) as usize] << 4;
-    ret ^= tables.col_down[((t >> 32) & ROW_MASK) as usize] << 8;
-    ret ^= tables.col_down[((t >> 48) & ROW_MASK) as usize] << 12;
-    ret
-}
-
-fn execute_move_2(board: Board) -> Board {
-    let tables = tables();
-    let mut ret = board;
-    ret ^= (tables.row_left[((board >> 0) & ROW_MASK) as usize] as Board) << 0;
-    ret ^= (tables.row_left[((board >> 16) & ROW_MASK) as usize] as Board) << 16;
-    ret ^= (tables.row_left[((board >> 32) & ROW_MASK) as usize] as Board) << 32;
-    ret ^= (tables.row_left[((board >> 48) & ROW_MASK) as usize] as Board) << 48;
-    ret
-}
-
-fn execute_move_3(board: Board) -> Board {
-    let tables = tables();
-    let mut ret = board;
-    ret ^= (tables.row_right[((board >> 0) & ROW_MASK) as usize] as Board) << 0;
-    ret ^= (tables.row_right[((board >> 16) & ROW_MASK) as usize] as Board) << 16;
-    ret ^= (tables.row_right[((board >> 32) & ROW_MASK) as usize] as Board) << 32;
-    ret ^= (tables.row_right[((board >> 48) & ROW_MASK) as usize] as Board) << 48;
-    ret
-}
-
-fn execute_move(move_id: i32, board: Board) -> Board {
-    match move_id {
-        0 => execute_move_0(board),
-        1 => execute_move_1(board),
-        2 => execute_move_2(board),
-        3 => execute_move_3(board),
-        _ => !0,
-    }
-}
-
-fn score_helper(board: Board, table: &[f32; 65536]) -> f32 {
-    table[((board >> 0) & ROW_MASK) as usize]
-        + table[((board >> 16) & ROW_MASK) as usize]
-        + table[((board >> 32) & ROW_MASK) as usize]
-        + table[((board >> 48) & ROW_MASK) as usize]
-}
-
-fn score_heur_board(board: Board) -> f32 {
-    let tables = tables();
-    score_helper(board, &tables.heur_score) + score_helper(transpose(board), &tables.heur_score)
-}
-
-fn score_board(board: Board) -> f32 {
-    let tables = tables();
-    score_helper(board, &tables.score)
-}
-
-fn score_toplevel_move(state: &mut EvalState, board: Board, move_id: i32) -> f32 {
-    let new_board = execute_move(move_id, board);
-    if board == new_board {
-        return 0.0;
-    }
-    score_tilechoose_node(state, new_board, 1.0) + 1e-6
-}
-
-fn score_move_node(state: &mut EvalState, board: Board, cprob: f32) -> f32 {
-    let mut best = 0.0f32;
-    state.curdepth += 1;
-
-    for move_id in 0..4 {
-        let new_board = execute_move(move_id, board);
-        state.moves_evaled += 1;
-        if board != new_board {
-            best = best.max(score_tilechoose_node(state, new_board, cprob));
-        }
-    }
-
-    state.curdepth -= 1;
-    best
-}
-
-fn score_tilechoose_node(state: &mut EvalState, board: Board, cprob: f32) -> f32 {
-    if cprob < CPROB_THRESH_BASE || state.curdepth >= state.depth_limit {
-        return score_heur_board(board);
-    }
-
-    if state.curdepth < CACHE_DEPTH_LIMIT {
-        if let Some(entry) = state.trans_table.get(&board) {
-            if entry.depth as i32 <= state.curdepth {
-                state.cachehits += 1;
-                return entry.heuristic;
-            }
-        }
-    }
-
-    let num_open = count_empty(board);
-    if num_open == 0 {
-        return score_move_node(state, board, cprob);
-    }
-
-    let next_prob = cprob / num_open as f32;
-    let mut res = 0.0f32;
-    let mut tmp = board;
-    let mut tile_2 = 1u64;
-
-    for _ in 0..16 {
-        if tmp & 0xf == 0 {
-            res += score_move_node(state, board | tile_2, next_prob * 0.9) * 0.9;
-            res += score_move_node(state, board | (tile_2 << 1), next_prob * 0.1) * 0.1;
-        }
-        tmp >>= 4;
-        tile_2 <<= 4;
-    }
-
-    res /= num_open as f32;
-
-    if state.curdepth < CACHE_DEPTH_LIMIT {
-        state.trans_table.insert(
-            board,
-            TransEntry {
-                depth: state.curdepth as u8,
-                heuristic: res,
-            },
-        );
-    }
-
-    res
-}
+mod algorithms;
+mod board;
+mod ffi;
+mod tables;
+
+pub use ffi::{
+    choose_move, current_algorithm, init_tables, last_algorithm, last_cache_hits, last_depth,
+    last_nodes, score_board_export, score_heur_board_export, set_algorithm,
+    set_trans_table_capacity,
+};
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::algorithms::expectimax::heuristic::score_heur_board;
+    use super::algorithms::expectimax::{
+        choose_move_with_table, score_toplevel_move, trans_table_capacity, EvalState, TransEntry,
+    };
+    use super::algorithms::{choose_move_with_algorithm, AlgorithmId};
+    use super::board::{count_distinct_tiles, count_empty, reverse_row, transpose, Board};
+    use super::ffi::{
+        choose_move, current_algorithm, init_tables, last_algorithm, last_cache_hits, last_depth,
+        last_nodes, set_algorithm,
+    };
+    use super::tables::execute_move;
+    use hashbrown::HashMap;
     use std::collections::HashMap as StdHashMap;
     use std::time::Instant;
 
@@ -524,12 +85,14 @@ mod tests {
     }
 
     fn score_tilechoose_node_std(state: &mut StdEvalState, board: Board, cprob: f32) -> f32 {
-        if cprob < CPROB_THRESH_BASE || state.curdepth >= state.depth_limit {
+        if cprob < super::algorithms::expectimax::CPROB_THRESH_BASE
+            || state.curdepth >= state.depth_limit
+        {
             state.maxdepth = state.maxdepth.max(state.curdepth);
             return score_heur_board(board);
         }
 
-        if state.curdepth < CACHE_DEPTH_LIMIT {
+        if state.curdepth < super::algorithms::expectimax::CACHE_DEPTH_LIMIT {
             if let Some(entry) = state.trans_table.get(&board) {
                 if entry.depth as i32 <= state.curdepth {
                     state.cachehits += 1;
@@ -559,7 +122,7 @@ mod tests {
 
         res /= num_open as f32;
 
-        if state.curdepth < CACHE_DEPTH_LIMIT {
+        if state.curdepth < super::algorithms::expectimax::CACHE_DEPTH_LIMIT {
             state.trans_table.insert(
                 board,
                 TransEntry {
@@ -659,6 +222,85 @@ mod tests {
     }
 
     #[test]
+    fn algorithm_selection_defaults_to_expectimax() {
+        assert_eq!(
+            set_algorithm(AlgorithmId::Expectimax.as_i32()),
+            AlgorithmId::Expectimax.as_i32()
+        );
+        assert_eq!(current_algorithm(), AlgorithmId::Expectimax.as_i32());
+        assert_eq!(
+            set_algorithm(AlgorithmId::EndgameTablebase.as_i32()),
+            AlgorithmId::EndgameTablebase.as_i32()
+        );
+        assert_eq!(current_algorithm(), AlgorithmId::EndgameTablebase.as_i32());
+        assert_eq!(set_algorithm(12345), AlgorithmId::Expectimax.as_i32());
+        assert_eq!(current_algorithm(), AlgorithmId::Expectimax.as_i32());
+    }
+
+    #[test]
+    fn dispatch_matches_explicit_expectimax() {
+        init_tables();
+
+        for board in sample_boards() {
+            let dispatched = choose_move_with_algorithm(AlgorithmId::Expectimax, board);
+            let mut table = HashMap::with_capacity(trans_table_capacity());
+            let explicit = choose_move_with_table(board, &mut table);
+
+            assert_eq!(dispatched.move_id, explicit.move_id);
+            assert_eq!(dispatched.depth, explicit.depth);
+            assert_eq!(dispatched.nodes, explicit.nodes);
+            assert_eq!(dispatched.cache_hits, explicit.cache_hits);
+            assert_eq!(
+                dispatched.algorithm.as_i32(),
+                AlgorithmId::Expectimax.as_i32()
+            );
+        }
+    }
+
+    #[test]
+    fn ffi_choose_move_records_algorithm_and_stats() {
+        init_tables();
+        set_algorithm(AlgorithmId::Expectimax.as_i32());
+
+        for board in sample_boards() {
+            let result = choose_move_with_algorithm(AlgorithmId::Expectimax, board);
+            let move_id = choose_move(board);
+
+            assert_eq!(move_id, result.move_id);
+            assert_eq!(last_algorithm(), AlgorithmId::Expectimax.as_i32());
+            assert_eq!(last_depth(), result.depth);
+            assert_eq!(last_nodes(), result.nodes);
+            assert_eq!(last_cache_hits(), result.cache_hits);
+        }
+    }
+
+    #[test]
+    fn dispatch_uses_endgame_tablebase_algorithm_id() {
+        init_tables();
+
+        for board in sample_boards() {
+            let result = choose_move_with_algorithm(AlgorithmId::EndgameTablebase, board);
+            assert_eq!(
+                result.algorithm.as_i32(),
+                AlgorithmId::EndgameTablebase.as_i32()
+            );
+            assert!((-1..4).contains(&result.move_id));
+            if result.move_id >= 0 {
+                assert_ne!(execute_move(result.move_id, board), board);
+            }
+        }
+    }
+
+    #[test]
+    fn endgame_tablebase_data_and_direction_helpers_are_valid() {
+        assert!(super::algorithms::endgame_tablebase::tests::bundled_tablebase_parses());
+        assert!(super::algorithms::endgame_tablebase::tests::bad_magic_is_rejected());
+        assert!(super::algorithms::endgame_tablebase::tests::special_case_move_is_left());
+        assert!(super::algorithms::endgame_tablebase::tests::direction_mapping_is_stable());
+        assert!(super::algorithms::endgame_tablebase::tests::probe_after_move_runs());
+    }
+
+    #[test]
     fn hashbrown_cache_matches_std_hashmap_reference() {
         init_tables();
 
@@ -691,30 +333,24 @@ mod tests {
 
         for board in sample_boards() {
             let mut fresh_table = HashMap::with_capacity(trans_table_capacity());
-            let fresh_move = choose_move_with_table(board, &mut fresh_table);
-            let fresh_nodes = unsafe { LAST_NODES };
-            let fresh_cache_hits = unsafe { LAST_CACHE_HITS };
-            let fresh_depth = unsafe { LAST_DEPTH };
+            let fresh = choose_move_with_table(board, &mut fresh_table);
 
-            let reused_move = choose_move(board);
-            let reused_nodes = unsafe { LAST_NODES };
-            let reused_cache_hits = unsafe { LAST_CACHE_HITS };
-            let reused_depth = unsafe { LAST_DEPTH };
+            let reused = choose_move_with_algorithm(AlgorithmId::Expectimax, board);
 
             assert_eq!(
-                fresh_move, reused_move,
+                fresh.move_id, reused.move_id,
                 "move differs for board 0x{board:016x}"
             );
             assert_eq!(
-                fresh_nodes, reused_nodes,
+                fresh.nodes, reused.nodes,
                 "nodes differ for board 0x{board:016x}"
             );
             assert_eq!(
-                fresh_cache_hits, reused_cache_hits,
+                fresh.cache_hits, reused.cache_hits,
                 "cache hits differ for board 0x{board:016x}"
             );
             assert_eq!(
-                fresh_depth, reused_depth,
+                fresh.depth, reused.depth,
                 "depth differs for board 0x{board:016x}"
             );
         }

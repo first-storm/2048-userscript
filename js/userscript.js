@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         play2048.co Rust WASM Expectimax Bot
 // @namespace    https://play2048.co/
-// @version      0.5.3
+// @version      0.6.0
 // @description  Rust WASM 2048 AI
 // @match        https://play2048.co/*
 // @run-at       document-idle
@@ -12,12 +12,18 @@
 (() => {
     "use strict";
 
+    const ALGORITHM_STORAGE_KEY = "play2048-wasm-ai.algorithm";
+    const ALGORITHMS = [
+        { id: 0, label: "Expectimax" },
+        { id: 1, label: "Endgame Tablebase" },
+    ];
     const CFG = {
         tickMs: 20,
         autoContinueAfterWin: true,
         debug: false,
         useWorker: true,
         transTableCapacity: isSafari() ? (1 << 18) : (1 << 20),
+        algorithm: readSavedAlgorithm(),
     };
     const DIRS = ["up", "down", "left", "right"];
     const RANK_BY_VALUE = (() => {
@@ -31,16 +37,34 @@
 /* WASM_BASE64_END */;
 
     let wasm, wasmPromise, worker, workerUrl, workerReady, workerSeq = 0, workerPending = new Map();
-    let running = false, timer = 0, statusEl, statsEl, startBtn, stopBtn;
+    let running = false, timer = 0, statusEl, statsEl, startBtn, stopBtn, algorithmSelect;
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const fmt = (v) => (typeof v === "bigint" ? v : Number(v || 0)).toLocaleString();
     const setStatus = (s) => { if (statusEl) statusEl.textContent = s; };
+    const algorithmLabel = (id) => (ALGORITHMS.find((a) => a.id === Number(id)) || ALGORITHMS[0]).label;
 
     function bytesFromBase64(s) {
         if (!s) throw new Error("WASM payload empty. Run cargo build then node tools/embed-wasm.mjs");
         const bin = atob(s), bytes = new Uint8Array(bin.length);
         for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
         return bytes;
+    }
+
+    function readSavedAlgorithm() {
+        try {
+            const saved = Number(localStorage.getItem(ALGORITHM_STORAGE_KEY));
+            if (ALGORITHMS.some((a) => a.id === saved)) return saved;
+        } catch (_) {}
+        return 0;
+    }
+
+    function setAlgorithm(id) {
+        const normalized = ALGORITHMS.some((a) => a.id === Number(id)) ? Number(id) : 0;
+        CFG.algorithm = normalized;
+        try { localStorage.setItem(ALGORITHM_STORAGE_KEY, String(normalized)); } catch (_) {}
+        if (algorithmSelect) algorithmSelect.value = String(normalized);
+        if (wasm && wasm.set_algorithm) CFG.algorithm = wasm.set_algorithm(normalized);
+        return CFG.algorithm;
     }
 
     function isSafari() {
@@ -52,6 +76,7 @@
         return wasm || (wasmPromise ||= WebAssembly.instantiate(bytesFromBase64(WASM_BASE64), {}).then(({ instance }) => {
             wasm = instance.exports;
             if (wasm.set_trans_table_capacity) wasm.set_trans_table_capacity(CFG.transTableCapacity);
+            if (wasm.set_algorithm) setAlgorithm(CFG.algorithm);
             wasm.init_tables();
             setStatus(CFG.useWorker ? "WASM fallback ready" : "WASM ready");
             return wasm;
@@ -60,11 +85,13 @@
 
     function syncThink(board) {
         const t0 = performance.now();
+        if (wasm.set_algorithm) setAlgorithm(CFG.algorithm);
         const move = wasm.choose_move(board);
         return {
             mode: "sync",
             move,
             ms: performance.now() - t0,
+            algorithm: wasm.last_algorithm ? wasm.last_algorithm() : CFG.algorithm,
             depth: wasm.last_depth(),
             nodes: wasm.last_nodes(),
             cache: wasm.last_cache_hits(),
@@ -78,6 +105,7 @@
 let wasm, ready;
 const WASM_BASE64 = ${JSON.stringify(WASM_BASE64)};
 const TRANS_TABLE_CAPACITY = ${JSON.stringify(CFG.transTableCapacity)};
+const DEFAULT_ALGORITHM = ${JSON.stringify(CFG.algorithm)};
 function bytesFromBase64(s) {
     const bin = atob(s), bytes = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
@@ -87,16 +115,18 @@ function loadWasm() {
     return wasm || (ready ||= WebAssembly.instantiate(bytesFromBase64(WASM_BASE64), {}).then(({ instance }) => {
         wasm = instance.exports;
         if (wasm.set_trans_table_capacity) wasm.set_trans_table_capacity(TRANS_TABLE_CAPACITY);
+        if (wasm.set_algorithm) wasm.set_algorithm(DEFAULT_ALGORITHM);
         wasm.init_tables();
         return wasm;
     }));
 }
 self.onmessage = async (event) => {
-    const { id, board } = event.data;
+    const { id, board, algorithm } = event.data;
     try {
         const exports = await loadWasm();
         const bitboard = typeof board === "bigint" ? board : BigInt(board);
         const t0 = performance.now();
+        if (exports.set_algorithm) exports.set_algorithm(Number.isInteger(algorithm) ? algorithm : DEFAULT_ALGORITHM);
         const move = exports.choose_move(bitboard);
         self.postMessage({
             id,
@@ -105,6 +135,7 @@ self.onmessage = async (event) => {
                 mode: "worker",
                 move,
                 ms: performance.now() - t0,
+                algorithm: exports.last_algorithm ? exports.last_algorithm() : (Number.isInteger(algorithm) ? algorithm : DEFAULT_ALGORITHM),
                 depth: exports.last_depth(),
                 nodes: exports.last_nodes(),
                 cache: exports.last_cache_hits(),
@@ -164,10 +195,10 @@ self.onmessage = async (event) => {
                     return await new Promise((resolve, reject) => {
                         workerPending.set(id, { resolve, reject });
                         try {
-                            worker.postMessage({ id, board });
+                            worker.postMessage({ id, board, algorithm: CFG.algorithm });
                         } catch (error) {
                             try {
-                                worker.postMessage({ id, board: board.toString() });
+                                worker.postMessage({ id, board: board.toString(), algorithm: CFG.algorithm });
                             } catch (fallbackError) {
                                 workerPending.delete(id);
                                 reject(fallbackError);
@@ -249,7 +280,7 @@ self.onmessage = async (event) => {
         statsEl.innerHTML = [
             ["Move", dir + " (d" + s.depth + ")"], ["Max", game.maxTile], ["Score", fmt(game.score)],
             ["Nodes", fmt(s.nodes)], ["Cache", fmt(s.cache)], ["Think", ms.toFixed(1) + "ms"],
-            ["Mode", s.mode], ["Heur", fmt(Math.round(s.heur))], ["Actual", fmt(Math.round(s.actual))],
+            ["Mode", s.mode], ["Alg", algorithmLabel(s.algorithm)], ["Heur", fmt(Math.round(s.heur))], ["Actual", fmt(Math.round(s.actual))],
         ].map(([k, v]) => "<span>" + k + "</span><b>" + v + "</b>").join("");
     }
 
@@ -291,12 +322,22 @@ self.onmessage = async (event) => {
 
     function mountUI() {
         if (document.getElementById("play2048-wasm-ui")) return;
-        document.head.append(el("style", "#play2048-wasm-ui{position:fixed;right:14px;bottom:14px;z-index:2147483647;width:260px;background:#211f1c;color:#eee;font:12px system-ui,sans-serif;border:1px solid #ffffff22;border-radius:8px;box-shadow:0 8px 28px #0008;overflow:hidden;user-select:none}#play2048-wasm-ui header{display:flex;justify-content:space-between;align-items:center;padding:9px 12px;background:#ffffff10;font-weight:700;cursor:move}#play2048-wasm-ui main{padding:10px;display:grid;gap:8px}.p8{padding:7px 9px;border-radius:7px;background:#ffffff10}.row{display:flex;gap:6px}.row button{flex:1;border:0;border-radius:7px;padding:7px 0;color:white;font:600 12px system-ui;cursor:pointer}.stats{display:grid;grid-template-columns:1fr 1fr;gap:4px 10px;color:#bbb}.stats b{color:#fff;text-align:right}"));
+        document.head.append(el("style", "#play2048-wasm-ui{position:fixed;right:14px;bottom:14px;z-index:2147483647;width:260px;background:#211f1c;color:#eee;font:12px system-ui,sans-serif;border:1px solid #ffffff22;border-radius:8px;box-shadow:0 8px 28px #0008;overflow:hidden;user-select:none}#play2048-wasm-ui header{display:flex;justify-content:space-between;align-items:center;padding:9px 12px;background:#ffffff10;font-weight:700;cursor:move}#play2048-wasm-ui main{padding:10px;display:grid;gap:8px}.p8{padding:7px 9px;border-radius:7px;background:#ffffff10}.row{display:flex;gap:6px}.row button{flex:1;border:0;border-radius:7px;padding:7px 0;color:white;font:600 12px system-ui;cursor:pointer}.field{display:grid;grid-template-columns:68px 1fr;align-items:center;gap:8px}.field label{color:#bbb}.field select{width:100%;border:1px solid #ffffff22;border-radius:7px;background:#2b2925;color:#fff;padding:6px 8px;font:12px system-ui}.stats{display:grid;grid-template-columns:1fr 1fr;gap:4px 10px;color:#bbb}.stats b{color:#fff;text-align:right}"));
 
         const root = el("div"); root.id = "play2048-wasm-ui";
         const body = el("main");
         statusEl = el("div", "Loading WASM..."); statusEl.className = "p8";
         statsEl = el("div", "No data yet"); statsEl.className = "p8 stats";
+        algorithmSelect = document.createElement("select");
+        for (const algorithm of ALGORITHMS) algorithmSelect.append(el("option", algorithm.label));
+        for (let i = 0; i < ALGORITHMS.length; i++) algorithmSelect.options[i].value = String(ALGORITHMS[i].id);
+        algorithmSelect.value = String(CFG.algorithm);
+        algorithmSelect.addEventListener("change", () => {
+            const id = setAlgorithm(Number(algorithmSelect.value));
+            setStatus("Algorithm: " + algorithmLabel(id));
+        });
+        const algorithmField = el("div"); algorithmField.className = "p8 field";
+        algorithmField.append(el("label", "Algorithm"), algorithmSelect);
         startBtn = el("button", "Start", "background:#2e7d32", start);
         stopBtn = el("button", "Stop", "background:#b71c1c", stop);
         const stepBtn = el("button", "Step", "background:#1565c0", step);
@@ -307,7 +348,7 @@ self.onmessage = async (event) => {
             setStatus("Score " + game.score + " | max " + game.maxTile + " | distinct " + distinctTiles(board));
         });
         const row = el("div"); row.className = "row"; row.append(startBtn, stopBtn, stepBtn, readBtn);
-        body.append(statusEl, statsEl, row);
+        body.append(statusEl, algorithmField, statsEl, row);
         root.append(el("header", "2048 WASM"), body);
         document.documentElement.append(root); toggleButtons(); drag(root, root.firstChild);
     }
@@ -323,7 +364,7 @@ self.onmessage = async (event) => {
         document.addEventListener("mouseup", () => { down = false; });
     }
 
-    window.Play2048WasmAI = { CFG, start, stop, step, loadWasm, loadWorker, assertWorkerEquivalence, boardToBitboard };
+    window.Play2048WasmAI = { CFG, ALGORITHMS, setAlgorithm, start, stop, step, loadWasm, loadWorker, assertWorkerEquivalence, boardToBitboard };
     (document.readyState === "loading" ? document.addEventListener("DOMContentLoaded", boot, { once: true }) : boot());
     function boot() {
         mountUI();
