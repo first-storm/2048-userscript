@@ -14,8 +14,6 @@ This repo is a Rust/WASM 2048 AI userscript for `play2048.co`. Keep the existing
 - Each algorithm lives in its own directory module under `src/algorithms/<algorithm>/`.
 - `src/algorithms/expectimax/mod.rs` owns the current default algorithm.
 - `src/algorithms/expectimax/heuristic.rs` owns expectimax-only board scoring helpers used by the algorithm and WASM score exports.
-- `src/algorithms/endgame_tablebase/mod.rs` owns the endgame tablebase algorithm.
-- `data/endgame_tablebase.bin` remains at the repo root under `data/`; update `include_bytes!` paths relative to the algorithm module file location.
 
 ## Adding A Rust Algorithm
 
@@ -26,7 +24,6 @@ This repo is a Rust/WASM 2048 AI userscript for `play2048.co`. Keep the existing
 5. Add the matching developer-facing option to `ALGORITHMS` in `js/userscript.js`.
 
 Algorithm ID `0` is reserved for `Expectimax` and must remain the default.
-Algorithm ID `1` is reserved for `EndgameTablebase`.
 
 ## JS/WASM Algorithm Selection
 

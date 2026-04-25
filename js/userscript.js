@@ -15,7 +15,6 @@
     const ALGORITHM_STORAGE_KEY = "play2048-wasm-ai.algorithm";
     const ALGORITHMS = [
         { id: 0, label: "Expectimax" },
-        { id: 1, label: "Endgame Tablebase" },
     ];
     const CFG = {
         tickMs: 20,
@@ -72,8 +71,12 @@
         return /Safari/i.test(ua) && !/Chrome|Chromium|CriOS|FxiOS|Edg|OPR/i.test(ua);
     }
 
+    function wasmImports() {
+        return { env: { play2048_now_ms: () => performance.now() } };
+    }
+
     function loadWasm() {
-        return wasm || (wasmPromise ||= WebAssembly.instantiate(bytesFromBase64(WASM_BASE64), {}).then(({ instance }) => {
+        return wasm || (wasmPromise ||= WebAssembly.instantiate(bytesFromBase64(WASM_BASE64), wasmImports()).then(({ instance }) => {
             wasm = instance.exports;
             if (wasm.set_trans_table_capacity) wasm.set_trans_table_capacity(CFG.transTableCapacity);
             if (wasm.set_algorithm) setAlgorithm(CFG.algorithm);
@@ -111,8 +114,11 @@ function bytesFromBase64(s) {
     for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     return bytes;
 }
+function wasmImports() {
+    return { env: { play2048_now_ms: () => performance.now() } };
+}
 function loadWasm() {
-    return wasm || (ready ||= WebAssembly.instantiate(bytesFromBase64(WASM_BASE64), {}).then(({ instance }) => {
+    return wasm || (ready ||= WebAssembly.instantiate(bytesFromBase64(WASM_BASE64), wasmImports()).then(({ instance }) => {
         wasm = instance.exports;
         if (wasm.set_trans_table_capacity) wasm.set_trans_table_capacity(TRANS_TABLE_CAPACITY);
         if (wasm.set_algorithm) wasm.set_algorithm(DEFAULT_ALGORITHM);

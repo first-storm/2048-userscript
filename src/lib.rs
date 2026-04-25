@@ -228,11 +228,9 @@ mod tests {
             AlgorithmId::Expectimax.as_i32()
         );
         assert_eq!(current_algorithm(), AlgorithmId::Expectimax.as_i32());
-        assert_eq!(
-            set_algorithm(AlgorithmId::EndgameTablebase.as_i32()),
-            AlgorithmId::EndgameTablebase.as_i32()
-        );
-        assert_eq!(current_algorithm(), AlgorithmId::EndgameTablebase.as_i32());
+        // unknown id (old EndgameTablebase id=1) falls back to Expectimax
+        assert_eq!(set_algorithm(1), AlgorithmId::Expectimax.as_i32());
+        assert_eq!(current_algorithm(), AlgorithmId::Expectimax.as_i32());
         assert_eq!(set_algorithm(12345), AlgorithmId::Expectimax.as_i32());
         assert_eq!(current_algorithm(), AlgorithmId::Expectimax.as_i32());
     }
@@ -272,32 +270,6 @@ mod tests {
             assert_eq!(last_nodes(), result.nodes);
             assert_eq!(last_cache_hits(), result.cache_hits);
         }
-    }
-
-    #[test]
-    fn dispatch_uses_endgame_tablebase_algorithm_id() {
-        init_tables();
-
-        for board in sample_boards() {
-            let result = choose_move_with_algorithm(AlgorithmId::EndgameTablebase, board);
-            assert_eq!(
-                result.algorithm.as_i32(),
-                AlgorithmId::EndgameTablebase.as_i32()
-            );
-            assert!((-1..4).contains(&result.move_id));
-            if result.move_id >= 0 {
-                assert_ne!(execute_move(result.move_id, board), board);
-            }
-        }
-    }
-
-    #[test]
-    fn endgame_tablebase_data_and_direction_helpers_are_valid() {
-        assert!(super::algorithms::endgame_tablebase::tests::bundled_tablebase_parses());
-        assert!(super::algorithms::endgame_tablebase::tests::bad_magic_is_rejected());
-        assert!(super::algorithms::endgame_tablebase::tests::special_case_move_is_left());
-        assert!(super::algorithms::endgame_tablebase::tests::direction_mapping_is_stable());
-        assert!(super::algorithms::endgame_tablebase::tests::probe_after_move_runs());
     }
 
     #[test]
