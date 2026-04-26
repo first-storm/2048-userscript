@@ -230,6 +230,8 @@ mod tests {
         assert_eq!(current_algorithm(), AlgorithmId::Expectimax.as_i32());
         assert_eq!(set_algorithm(1), AlgorithmId::Greedy.as_i32());
         assert_eq!(current_algorithm(), AlgorithmId::Greedy.as_i32());
+        assert_eq!(set_algorithm(2), AlgorithmId::Expectimax.as_i32());
+        assert_eq!(current_algorithm(), AlgorithmId::Expectimax.as_i32());
         assert_eq!(set_algorithm(12345), AlgorithmId::Expectimax.as_i32());
         assert_eq!(current_algorithm(), AlgorithmId::Expectimax.as_i32());
     }
@@ -337,8 +339,10 @@ mod tests {
                 );
             }
 
+            let mut expectimax_table = HashMap::with_capacity(trans_table_capacity());
+            let expectimax = choose_move_with_table(board, &mut expectimax_table);
             assert_eq!(
-                choose_move(board),
+                expectimax.move_id,
                 choose_move_std(board),
                 "best move differs for board 0x{board:016x}"
             );
