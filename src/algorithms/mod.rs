@@ -1,16 +1,19 @@
 use crate::board::Board;
 
 pub(crate) mod expectimax;
+pub(crate) mod greedy;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AlgorithmId {
     Expectimax,
+    Greedy,
 }
 
 impl AlgorithmId {
     pub(crate) fn from_i32(id: i32) -> Self {
         match id {
             0 => Self::Expectimax,
+            1 => Self::Greedy,
             _ => Self::Expectimax,
         }
     }
@@ -18,6 +21,7 @@ impl AlgorithmId {
     pub(crate) fn as_i32(self) -> i32 {
         match self {
             Self::Expectimax => 0,
+            Self::Greedy => 1,
         }
     }
 }
@@ -38,5 +42,6 @@ pub(crate) fn normalize_algorithm_id(id: i32) -> i32 {
 pub(crate) fn choose_move_with_algorithm(algorithm: AlgorithmId, board: Board) -> MoveResult {
     match algorithm {
         AlgorithmId::Expectimax => expectimax::choose_move(board),
+        AlgorithmId::Greedy => greedy::choose_move(board),
     }
 }

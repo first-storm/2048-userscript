@@ -1,5 +1,6 @@
 use crate::algorithms::expectimax;
 use crate::algorithms::expectimax::heuristic::{score_board, score_heur_board};
+use crate::algorithms::greedy::score_greedy_board;
 use crate::algorithms::{
     choose_move_with_algorithm, normalize_algorithm_id, AlgorithmId, MoveResult,
 };
@@ -57,6 +58,11 @@ pub extern "C" fn score_heur_board_export(board: Board) -> f64 {
 #[no_mangle]
 pub extern "C" fn score_board_export(board: Board) -> f64 {
     score_board(board) as f64
+}
+
+#[no_mangle]
+pub extern "C" fn score_greedy_board_export(board: Board) -> f64 {
+    score_greedy_board(board) as f64
 }
 
 #[no_mangle]

@@ -5,8 +5,8 @@ mod tables;
 
 pub use ffi::{
     choose_move, current_algorithm, init_tables, last_algorithm, last_cache_hits, last_depth,
-    last_nodes, score_board_export, score_heur_board_export, set_algorithm,
-    set_trans_table_capacity,
+    last_nodes, score_board_export, score_greedy_board_export, score_heur_board_export,
+    set_algorithm, set_trans_table_capacity,
 };
 
 #[cfg(test)]
@@ -228,9 +228,8 @@ mod tests {
             AlgorithmId::Expectimax.as_i32()
         );
         assert_eq!(current_algorithm(), AlgorithmId::Expectimax.as_i32());
-        // unknown id (old EndgameTablebase id=1) falls back to Expectimax
-        assert_eq!(set_algorithm(1), AlgorithmId::Expectimax.as_i32());
-        assert_eq!(current_algorithm(), AlgorithmId::Expectimax.as_i32());
+        assert_eq!(set_algorithm(1), AlgorithmId::Greedy.as_i32());
+        assert_eq!(current_algorithm(), AlgorithmId::Greedy.as_i32());
         assert_eq!(set_algorithm(12345), AlgorithmId::Expectimax.as_i32());
         assert_eq!(current_algorithm(), AlgorithmId::Expectimax.as_i32());
     }
@@ -256,6 +255,39 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_records_greedy_algorithm() {
+        init_tables();
+
+        for board in sample_boards() {
+            let result = choose_move_with_algorithm(AlgorithmId::Greedy, board);
+
+            assert_eq!(result.algorithm.as_i32(), AlgorithmId::Greedy.as_i32());
+            assert_eq!(result.depth, 1);
+            assert_eq!(result.cache_hits, 0);
+        }
+    }
+
+    #[test]
+    fn greedy_chooses_legal_move_or_no_move() {
+        init_tables();
+
+        for board in sample_boards() {
+            let result = choose_move_with_algorithm(AlgorithmId::Greedy, board);
+
+            assert!((0..4).contains(&result.move_id));
+            assert_ne!(execute_move(result.move_id, board), board);
+            assert!(result.nodes <= 4);
+        }
+
+        let locked =
+            board_from_ranks([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 1]]);
+        let result = choose_move_with_algorithm(AlgorithmId::Greedy, locked);
+
+        assert_eq!(result.move_id, -1);
+        assert_eq!(result.nodes, 0);
+    }
+
+    #[test]
     fn ffi_choose_move_records_algorithm_and_stats() {
         init_tables();
         set_algorithm(AlgorithmId::Expectimax.as_i32());
@@ -270,6 +302,20 @@ mod tests {
             assert_eq!(last_nodes(), result.nodes);
             assert_eq!(last_cache_hits(), result.cache_hits);
         }
+
+        set_algorithm(AlgorithmId::Greedy.as_i32());
+        for board in sample_boards() {
+            let result = choose_move_with_algorithm(AlgorithmId::Greedy, board);
+            let move_id = choose_move(board);
+
+            assert_eq!(move_id, result.move_id);
+            assert_eq!(last_algorithm(), AlgorithmId::Greedy.as_i32());
+            assert_eq!(last_depth(), result.depth);
+            assert_eq!(last_nodes(), result.nodes);
+            assert_eq!(last_cache_hits(), result.cache_hits);
+        }
+
+        set_algorithm(AlgorithmId::Expectimax.as_i32());
     }
 
     #[test]

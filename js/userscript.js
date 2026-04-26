@@ -15,6 +15,7 @@
     const ALGORITHM_STORAGE_KEY = "play2048-wasm-ai.algorithm";
     const ALGORITHMS = [
         { id: 0, label: "Expectimax" },
+        { id: 1, label: "Greedy Heuristic" },
     ];
     const CFG = {
         tickMs: 20,
@@ -99,6 +100,7 @@
             nodes: wasm.last_nodes(),
             cache: wasm.last_cache_hits(),
             heur: wasm.score_heur_board_export(board),
+            greedy: wasm.score_greedy_board_export ? wasm.score_greedy_board_export(board) : 0,
             actual: wasm.score_board_export(board),
         };
     }
@@ -146,6 +148,7 @@ self.onmessage = async (event) => {
                 nodes: exports.last_nodes(),
                 cache: exports.last_cache_hits(),
                 heur: exports.score_heur_board_export(bitboard),
+                greedy: exports.score_greedy_board_export ? exports.score_greedy_board_export(bitboard) : 0,
                 actual: exports.score_board_export(bitboard),
             },
         });
@@ -286,7 +289,7 @@ self.onmessage = async (event) => {
         statsEl.innerHTML = [
             ["Move", dir + " (d" + s.depth + ")"], ["Max", game.maxTile], ["Score", fmt(game.score)],
             ["Nodes", fmt(s.nodes)], ["Cache", fmt(s.cache)], ["Think", ms.toFixed(1) + "ms"],
-            ["Mode", s.mode], ["Alg", algorithmLabel(s.algorithm)], ["Heur", fmt(Math.round(s.heur))], ["Actual", fmt(Math.round(s.actual))],
+            ["Mode", s.mode], ["Alg", algorithmLabel(s.algorithm)], ["Heur", fmt(Math.round(s.heur))], ["Greedy", fmt(Math.round(s.greedy))], ["Actual", fmt(Math.round(s.actual))],
         ].map(([k, v]) => "<span>" + k + "</span><b>" + v + "</b>").join("");
     }
 
@@ -306,7 +309,7 @@ self.onmessage = async (event) => {
                 if (asyncResult.mode !== "worker") {
                     throw new Error("Worker unavailable during equivalence check");
                 }
-                for (const key of ["move", "depth", "nodes", "cache", "heur", "actual"]) {
+                for (const key of ["move", "depth", "nodes", "cache", "heur", "greedy", "actual"]) {
                     if (Object.is(sync[key], asyncResult[key])) continue;
                     throw new Error("Worker mismatch for " + key + " on 0x" + board.toString(16));
                 }
